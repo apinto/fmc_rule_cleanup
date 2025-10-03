@@ -175,7 +175,8 @@ class FMCRuleManager:
             "total_rules_analyzed": 0,
             "zero_hit_rules": 0,
             "rules_disabled": 0,
-            "rules_skipped": 0
+            "rules_skipped": 0,
+            "disabled_rules_details": []  # List to store details of disabled rules
         }
         
         current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -225,13 +226,18 @@ class FMCRuleManager:
                 for item in hit_count_result["items"]:
                     stats["total_rules_analyzed"] += 1
                     rule_name = item["rule"]["name"]
+                    rule_type = item["rule"].get("type", "Unknown")
                     hit_count = item["hitCount"]
                     
                     logging.debug(f"Rule '{rule_name}' has {hit_count} hits")
                     
                     if hit_count == 0:
-                        zero_hit_rule_ids.append(item["rule"]["id"])
-                        stats["zero_hit_rules"] += 1
+                        # Only process AccessRule types, skip default actions and other special rule types
+                        if rule_type == "AccessRule":
+                            zero_hit_rule_ids.append(item["rule"]["id"])
+                            stats["zero_hit_rules"] += 1
+                        else:
+                            logging.debug(f"Skipping rule '{rule_name}' with type '{rule_type}' - not a regular access rule")
                         
                 logging.info(f"Found {len(zero_hit_rule_ids)} rules with zero hit counts")
                 
@@ -255,9 +261,27 @@ class FMCRuleManager:
                         should_disable, reason = self._should_disable_rule(rule_data, current_time)
                         
                         if should_disable:
+                            # Extract first comment if available
+                            first_comment = ""
+                            if "commentHistoryList" in rule_data and rule_data["commentHistoryList"]:
+                                first_comment_data = rule_data["commentHistoryList"][0]
+                                first_comment = first_comment_data.get("comment", "")
+                                first_comment_date = first_comment_data.get("date", "")
+                                if first_comment and first_comment_date:
+                                    first_comment = f"{first_comment} ({first_comment_date})"
+                            
+                            # Store rule details for summary
+                            rule_details = {
+                                "name": rule_name,
+                                "id": rule_id,
+                                "first_comment": first_comment or "No comment history",
+                                "reason": reason
+                            }
+                            
                             if self.dry_run:
                                 logging.info(f"[DRY RUN] Would disable rule '{rule_name}' - {reason}")
                                 stats["rules_disabled"] += 1
+                                stats["disabled_rules_details"].append(rule_details)
                             else:
                                 # Disable the rule and add comment
                                 access_rule.enabled = False
@@ -267,6 +291,7 @@ class FMCRuleManager:
                                 
                                 logging.info(f"Disabled rule '{rule_name}' - {reason}")
                                 stats["rules_disabled"] += 1
+                                stats["disabled_rules_details"].append(rule_details)
                                 
                             disabled_count += 1
                         else:
@@ -284,6 +309,55 @@ class FMCRuleManager:
             raise
             
         return stats
+
+
+def format_disabled_rules_table(disabled_rules: List[Dict]) -> str:
+    """
+    Format disabled rules data into a readable table.
+    
+    Args:
+        disabled_rules: List of disabled rule dictionaries
+        
+    Returns:
+        Formatted table string
+    """
+    if not disabled_rules:
+        return "No rules were disabled."
+    
+    # Calculate column widths
+    name_width = max(len("Rule Name"), max(len(rule["name"]) for rule in disabled_rules))
+    id_width = len("ECF40C21-3F6A-0ed3-0000-000268479583")  # Fixed width for rule IDs
+    comment_width = max(len("First Comment"), max(len(rule["first_comment"]) for rule in disabled_rules))
+    reason_width = max(len("Disable Reason"), max(len(rule["reason"]) for rule in disabled_rules))
+    
+    # Limit column widths for readability
+    name_width = min(name_width, 35)
+    comment_width = min(comment_width, 55)
+    reason_width = min(reason_width, 45)
+    
+    # Create table format
+    separator = "+" + "-" * (name_width + 2) + "+" + "-" * (id_width + 2) + "+" + "-" * (comment_width + 2) + "+" + "-" * (reason_width + 2) + "+"
+    header_format = f"| {{:<{name_width}}} | {{:<{id_width}}} | {{:<{comment_width}}} | {{:<{reason_width}}} |"
+    row_format = f"| {{:<{name_width}.{name_width}}} | {{:<{id_width}}} | {{:<{comment_width}.{comment_width}}} | {{:<{reason_width}.{reason_width}}} |"
+    
+    # Build table
+    lines = [
+        separator,
+        header_format.format("Rule Name", "Rule ID", "First Comment", "Disable Reason"),
+        separator
+    ]
+    
+    for rule in disabled_rules:
+        lines.append(row_format.format(
+            rule["name"],
+            rule["id"], 
+            rule["first_comment"],
+            rule["reason"]
+        ))
+    
+    lines.append(separator)
+    
+    return "\n".join(lines)
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -426,6 +500,21 @@ def main() -> int:
         print(f"Rules skipped: {stats['rules_skipped']}")
         if args.dry_run:
             print("\nNOTE: This was a dry run - no changes were made to FMC")
+        
+        # Display disabled rules table
+        if stats['disabled_rules_details']:
+            print(f"\nDISABLED RULES DETAILS ({len(stats['disabled_rules_details'])} rules):")
+            print("="*50)
+            disabled_rules_table = format_disabled_rules_table(stats['disabled_rules_details'])
+            print(disabled_rules_table)
+            
+            # Also log the table to debug log
+            logging.info("DISABLED RULES DETAILS:")
+            for line in disabled_rules_table.split('\n'):
+                logging.info(line)
+        else:
+            print("\nNo rules were disabled during this operation.")
+            
         print("="*50)
         
         return 0

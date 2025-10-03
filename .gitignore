@@ -1,4 +1,5 @@
 __pycache__/
 venv/
 *.log
+run_fmc_test.sh
 
