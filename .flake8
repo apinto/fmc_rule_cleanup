@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""
+Flake8 configuration for FMC scripts.
+"""
+
+[flake8]
+max-line-length = 100
+exclude = .git,__pycache__,venv,env
+ignore = E203,W503

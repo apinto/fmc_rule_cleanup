@@ -1,0 +1,18 @@
+# Production dependencies
+certifi==2024.8.30
+charset-normalizer==3.4.0
+DateTime==5.5
+fmcapi==20241021.0
+idna==3.10
+ipaddress==1.0.23
+pytz==2024.2
+requests==2.32.3
+urllib3==1.26.6
+xmltodict==0.14.2
+zope.interface==7.1.1
+
+# Development dependencies (optional)
+flake8>=6.0.0
+black>=23.0.0
+mypy>=1.0.0
+pylint>=2.17.0
