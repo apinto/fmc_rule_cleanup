@@ -1,5 +1,6 @@
 __pycache__/
 venv/
+old/
 *.log
 run_fmc_test.sh
-
+FW*
