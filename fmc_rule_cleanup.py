@@ -143,11 +143,11 @@ class FMCRuleManager:
             logging.root.removeHandler(handler)
         
         if self.log_file:
-            # Only log to file, not to console
+            # Only log to file, not to console, and append to the log file
             logging.basicConfig(
                 level=log_level,
                 format='%(asctime)s - %(levelname)s - %(message)s',
-                handlers=[logging.FileHandler(self.log_file)]
+                handlers=[logging.FileHandler(self.log_file, mode='a')]
             )
             print(f"Logging to file: {self.log_file}")
         else:
@@ -1187,20 +1187,7 @@ def main() -> int:
     if args.dry_run:
         print("\nNOTE: This was a dry run - no changes were made to FMC")
     
-    # Display disabled rules table
-    if stats['disabled_rules_details']:
-        print(f"\nDISABLED RULES DETAILS ({len(stats['disabled_rules_details'])} rules):")
-        print("="*50)
-        disabled_rules_table = format_disabled_rules_table(stats['disabled_rules_details'])
-        print(disabled_rules_table)
-        
-        # Also log the table to debug log
-        logging.info("DISABLED RULES DETAILS:")
-        for line in disabled_rules_table.split('\n'):
-            logging.info(line)
-    else:
-        print("\nNo rules were disabled during this operation.")
-        
+    # Disabled rules table is now only in Excel report, not in log or console
     print("="*50)
     
     # Generate Excel report if requested
