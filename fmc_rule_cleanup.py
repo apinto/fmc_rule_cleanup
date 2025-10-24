@@ -551,7 +551,10 @@ class FMCRuleManager:
         if "not enabled" in reason.lower() or "action" in reason.lower():
             rule_enabled = rule_data.get("enabled", False)
             rule_action = rule_data.get("action", "UNKNOWN")
-            return f"Enabled: {rule_enabled} | Action: {rule_action} | Required actions: {', '.join(self.rule_actions)}"
+            if not rule_enabled:
+                return f"Enabled: False | Action: {rule_action} | Rule is already disabled"
+            else:
+                return f"Enabled: True | Action: {rule_action} | Required actions: {', '.join(self.rule_actions)}"
         
         # Check for criteria not met (age-based)
         if "does not meet disable criteria" in reason.lower():
