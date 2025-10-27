@@ -551,10 +551,7 @@ class FMCRuleManager:
         if "not enabled" in reason.lower() or "action" in reason.lower():
             rule_enabled = rule_data.get("enabled", False)
             rule_action = rule_data.get("action", "UNKNOWN")
-            if not rule_enabled:
-                return f"Enabled: False | Action: {rule_action} | Rule is already disabled"
-            else:
-                return f"Enabled: True | Action: {rule_action} | Required actions: {', '.join(self.rule_actions)}"
+            return f"Enabled: {rule_enabled} | Action: {rule_action} | Required actions: {', '.join(self.rule_actions)}"
         
         # Check for criteria not met (age-based)
         if "does not meet disable criteria" in reason.lower():
@@ -614,197 +611,224 @@ class FMCRuleManager:
             print(f"\nSuccessfully connected to FMC at {self.host}")
             if self.dry_run:
                 print("DRY RUN MODE - No changes will be made to FMC")
+            
+            # Get device information
+            device = fmcapi.DeviceRecords(fmc=fmc_client, name=self.device_name)
+            device.get()
+            
+            if not hasattr(device, 'accessPolicy') or not device.accessPolicy:
+                logging.error(f"No access policy found for device '{self.device_name}'")
+                return stats
                 
-                # Get device information
-                device = fmcapi.DeviceRecords(fmc=fmc_client, name=self.device_name)
-                device.get()
+            acp_id = device.accessPolicy["id"]
+            logging.info(f"Found access policy ID: {acp_id}")
+            
+            # Get hit counts
+            hit_counter = fmcapi.HitCounts(
+                fmc=fmc_client, 
+                acp_id=acp_id, 
+                device_name=self.device_name
+            )
+            
+            hit_count_result = hit_counter.get()
+            
+            if "items" not in hit_count_result:
+                logging.error("No hit count data received from FMC")
+                return stats
+            
+            # Identify rules with zero hits
+            zero_hit_rule_ids = []
+            for item in hit_count_result["items"]:
+                stats["total_rules_analyzed"] += 1
+                rule_name = item["rule"]["name"]
+                rule_type = item["rule"].get("type", "Unknown")
+                hit_count = item["hitCount"]
                 
-                if not hasattr(device, 'accessPolicy') or not device.accessPolicy:
-                    logging.error(f"No access policy found for device '{self.device_name}'")
-                    return stats
-                    
-                acp_id = device.accessPolicy["id"]
-                logging.info(f"Found access policy ID: {acp_id}")
+                logging.debug(f"Rule '{rule_name}' has {hit_count} hits")
                 
-                # Get hit counts
-                hit_counter = fmcapi.HitCounts(
-                    fmc=fmc_client, 
-                    acp_id=acp_id, 
-                    device_name=self.device_name
-                )
+                if hit_count == 0:
+                    # Only process AccessRule types, skip default actions and other special rule types
+                    if rule_type == "AccessRule":
+                        zero_hit_rule_ids.append(item["rule"]["id"])
+                        stats["zero_hit_rules"] += 1
+                    else:
+                        logging.debug(f"Skipping rule '{rule_name}' with type '{rule_type}' - not a regular access rule")
+            
+            logging.info(f"Found {len(zero_hit_rule_ids)} rules with zero hit counts")
+            total_to_process = min(len(zero_hit_rule_ids), self.max_rules_to_disable)
+            # Only print minimal info to console - zero hit rules found and starting progress
+            print(f"\nFound {len(zero_hit_rule_ids)} rules with zero hit counts")
+            print(f"Processing {total_to_process} rules...")
+            
+            # Process each zero-hit rule
+            disabled_count = 0
+            processed_count = 0
+            
+            # Track consecutive retries across all rules
+            consecutive_retries = 0
+            max_consecutive_retries = 10  # Maximum number of consecutive retries allowed
+            
+            for rule_id in zero_hit_rule_ids:
+                # Stop processing if we've reached the maximum number of rules to process
+                if processed_count >= total_to_process:
+                    logging.info(f"Reached maximum rule processing limit: {total_to_process}")
+                    break
                 
-                hit_count_result = hit_counter.get()
+                # Exit if too many consecutive retries
+                if consecutive_retries >= max_consecutive_retries:
+                    logging.error(f"Reached maximum consecutive retries limit: {max_consecutive_retries}. Stopping processing.")
+                    print(f"\nReached maximum consecutive retries limit: {max_consecutive_retries}. Stopping processing.")
+                    break
                 
-                if "items" not in hit_count_result:
-                    logging.error("No hit count data received from FMC")
-                    return stats
-                    
-                # Identify rules with zero hits
-                zero_hit_rule_ids = []
-                for item in hit_count_result["items"]:
-                    stats["total_rules_analyzed"] += 1
-                    rule_name = item["rule"]["name"]
-                    rule_type = item["rule"].get("type", "Unknown")
-                    hit_count = item["hitCount"]
-                    
-                    logging.debug(f"Rule '{rule_name}' has {hit_count} hits")
-                    
-                    if hit_count == 0:
-                        # Only process AccessRule types, skip default actions and other special rule types
-                        if rule_type == "AccessRule":
-                            zero_hit_rule_ids.append(item["rule"]["id"])
-                            stats["zero_hit_rules"] += 1
-                        else:
-                            logging.debug(f"Skipping rule '{rule_name}' with type '{rule_type}' - not a regular access rule")
+                # Update progress bar
+                processed_count += 1
+                print_progress_bar(processed_count, total_to_process, prefix='Progress:', 
+                                  suffix=f'({disabled_count} rules disabled)', length=50)
+                
+                # Get detailed rule information with connection retry
+                # HTTP 429 is handled by fmcapi internally
+                # But connection timeouts need manual retry with progressive backoff
+                retry_delays = [60, 90, 120, 240]  # Progressive backoff delays
+                max_retries = len(retry_delays)
+                retry_occurred = False
+                for attempt in range(max_retries):
+                    try:
+                        access_rule = fmcapi.AccessRules(
+                            fmc=fmc_client, 
+                            acp_id=acp_id, 
+                            id=rule_id
+                        )
+                        rule_data = access_rule.get()
+                        # Success - reset consecutive retries counter
+                        consecutive_retries = 0
+                        retry_occurred = False
+                        break  # Success
+                    except requests.exceptions.ConnectTimeout:
+                        # Mark that a retry was needed
+                        retry_occurred = True
+                        consecutive_retries += 1
                         
-                logging.info(f"Found {len(zero_hit_rule_ids)} rules with zero hit counts")
-                total_to_process = min(len(zero_hit_rule_ids), self.max_rules_to_disable)
-                # Only print minimal info to console - zero hit rules found and starting progress
-                print(f"\nFound {len(zero_hit_rule_ids)} rules with zero hit counts")
-                print(f"Processing {total_to_process} rules...")
+                        if attempt < max_retries - 1:  # Don't sleep on last attempt
+                            delay = retry_delays[attempt]
+                            # Log details to file
+                            logging.warning(f"Connection timeout for rule ID {rule_id}. Retrying in {delay}s (attempt {attempt+1}/{max_retries}, consecutive: {consecutive_retries}/{max_consecutive_retries})...")
+                            
+                            retry_num = attempt + 1
+                            
+                            # Countdown timer integrated with progress bar
+                            for remaining in range(delay, 0, -1):
+                                # Show the progress bar with retry information
+                                retry_info = f"Retry #{retry_num}/{max_retries} - {remaining}s remaining (consecutive: {consecutive_retries}/{max_consecutive_retries})"
+                                print_progress_bar(
+                                    processed_count, 
+                                    total_to_process, 
+                                    prefix='Progress:', 
+                                    suffix=f'({disabled_count} rules) | {retry_info}', 
+                                    length=50
+                                )
+                                time.sleep(1)
+                            
+                            # After countdown, restore the regular progress bar
+                            print_progress_bar(processed_count, total_to_process, prefix='Progress:', 
+                                             suffix=f'({disabled_count} rules disabled)', length=50)
+                        continue
                 
-                # Process each zero-hit rule
-                disabled_count = 0
-                processed_count = 0
-                
-                # Track consecutive retries across all rules
-                consecutive_retries = 0
-                max_consecutive_retries = 10  # Maximum number of consecutive retries allowed
-                
-                for rule_id in zero_hit_rule_ids:
-                    if disabled_count >= self.max_rules_to_disable:
-                        logging.info(f"Reached maximum rule disable limit: {self.max_rules_to_disable}")
-                        break
-                    
-                    # Exit if too many consecutive retries
-                    if consecutive_retries >= max_consecutive_retries:
-                        logging.error(f"Reached maximum consecutive retries limit: {max_consecutive_retries}. Stopping processing.")
-                        print(f"\nReached maximum consecutive retries limit: {max_consecutive_retries}. Stopping processing.")
-                        break
-                    
-                    # Update progress bar
-                    processed_count += 1
+                # If retries were exhausted but we want to continue with next rule
+                if retry_occurred and attempt == max_retries - 1:
+                    logging.warning(f"All retries exhausted for rule ID {rule_id}. Skipping this rule and continuing with next.")
+                    stats["skipped_rules"] += 1
+                    # Update progress bar to show we're continuing despite retries
                     print_progress_bar(processed_count, total_to_process, prefix='Progress:', 
-                                      suffix=f'({disabled_count} rules disabled)', length=50)
-                    
-                    # Get detailed rule information with connection retry
-                    # HTTP 429 is handled by fmcapi internally
-                    # But connection timeouts need manual retry with progressive backoff
-                    retry_delays = [60, 90, 120, 240]  # Progressive backoff delays
-                    max_retries = len(retry_delays)
-                    retry_occurred = False
-                    for attempt in range(max_retries):
-                        try:
-                            access_rule = fmcapi.AccessRules(
-                                fmc=fmc_client, 
-                                acp_id=acp_id, 
-                                id=rule_id
-                            )
-                            rule_data = access_rule.get()
-                            # Success - reset consecutive retries counter
-                            consecutive_retries = 0
-                            retry_occurred = False
-                            break  # Success
-                        except requests.exceptions.ConnectTimeout:
-                            # Mark that a retry was needed
-                            retry_occurred = True
-                            consecutive_retries += 1
-                            
-                            if attempt < max_retries - 1:  # Don't sleep on last attempt
-                                delay = retry_delays[attempt]
-                                # Log details to file
-                                logging.warning(f"Connection timeout for rule ID {rule_id}. Retrying in {delay}s (attempt {attempt+1}/{max_retries}, consecutive: {consecutive_retries}/{max_consecutive_retries})...")
-                                
-                                retry_num = attempt + 1
-                                
-                                # Countdown timer integrated with progress bar
-                                for remaining in range(delay, 0, -1):
-                                    # Show the progress bar with retry information
-                                    retry_info = f"Retry #{retry_num}/{max_retries} - {remaining}s remaining (consecutive: {consecutive_retries}/{max_consecutive_retries})"
-                                    print_progress_bar(
-                                        processed_count, 
-                                        total_to_process, 
-                                        prefix='Progress:', 
-                                        suffix=f'({disabled_count} rules) | {retry_info}', 
-                                        length=50
-                                    )
-                                    time.sleep(1)
-                                
-                                # After countdown, restore the regular progress bar
-                                print_progress_bar(processed_count, total_to_process, prefix='Progress:', 
-                                                 suffix=f'({disabled_count} rules disabled)', length=50)
-                            continue
-                    
-                    # If retries were exhausted but we want to continue with next rule
-                    if retry_occurred and attempt == max_retries - 1:
-                        logging.warning(f"All retries exhausted for rule ID {rule_id}. Skipping this rule and continuing with next.")
-                        stats["skipped_rules"] += 1
-                        # Update progress bar to show we're continuing despite retries
-                        print_progress_bar(processed_count, total_to_process, prefix='Progress:', 
-                                          suffix=f'({disabled_count} rules, {stats["skipped_rules"]} skipped) | Rule skipped after max retries', length=50)
-                        time.sleep(2)  # Brief pause to show message
-                        continue  # Skip to next rule
-                            
-                    # Check if API call failed (returns None on auth failure)
-                    if rule_data is None:
-                        logging.error(f"Failed to fetch rule {rule_id} - API returned None (possible authentication failure)")
-                        logging.error("Exiting to prevent further errors.")
-                        break  # Exit the loop, don't continue processing
-                    
-                    rule_name = rule_data.get("name", "Unknown")
-                    
-                    # Extract first comment if available (needed for both disabled and ignored rules)
-                    first_comment = ""
-                    if "commentHistoryList" in rule_data and rule_data["commentHistoryList"]:
-                        first_comment_data = rule_data["commentHistoryList"][0]
-                        first_comment = first_comment_data.get("comment", "")
-                        first_comment_date = first_comment_data.get("date", "")
-                        if first_comment and first_comment_date:
-                            first_comment = f"{first_comment} ({first_comment_date})"
-                    
-                    should_disable, reason = self._should_disable_rule(rule_data, current_time, fmc_client)
-                    
-                    if should_disable:
-                        # Store rule details for summary
-                        rule_details = {
-                            "name": rule_name,
-                            "id": rule_id,
-                            "first_comment": first_comment or "No comment history",
-                            "reason": reason
-                        }
+                                      suffix=f'({disabled_count} rules, {stats["skipped_rules"]} skipped) | Rule skipped after max retries', length=50)
+                    time.sleep(2)  # Brief pause to show message
+                    continue  # Skip to next rule
                         
-                        if self.dry_run:
-                            logging.info(f"[DRY RUN] Would disable rule '{rule_name}' - {reason}")
-                            stats["rules_disabled"] += 1
-                            stats["disabled_rules_details"].append(rule_details)
-                        else:
-                            # Disable the rule and add comment
-                            access_rule.enabled = False
-                            comment = f"DisabledByHitCountScript {current_time} - {reason}"
-                            access_rule.new_comments(action="add", value=comment)
-                            access_rule.post()
-                            
+                # Check if API call failed (returns None on auth failure)
+                if rule_data is None:
+                    logging.error(f"Failed to fetch rule {rule_id} - API returned None (possible authentication failure)")
+                    logging.error("Exiting to prevent further errors.")
+                    break  # Exit the loop, don't continue processing
+                
+                rule_name = rule_data.get("name", "Unknown")
+                
+                # Extract first comment if available (needed for both disabled and ignored rules)
+                first_comment = ""
+                if "commentHistoryList" in rule_data and rule_data["commentHistoryList"]:
+                    first_comment_data = rule_data["commentHistoryList"][0]
+                    first_comment = first_comment_data.get("comment", "")
+                    first_comment_date = first_comment_data.get("date", "")
+                    if first_comment and first_comment_date:
+                        first_comment = f"{first_comment} ({first_comment_date})"
+                
+                should_disable, reason = self._should_disable_rule(rule_data, current_time, fmc_client)
+                
+                if should_disable:
+                    # Store rule details for summary
+                    rule_details = {
+                        "name": rule_name,
+                        "id": rule_id,
+                        "first_comment": first_comment or "No comment history",
+                        "reason": reason
+                    }
+                    
+                    if self.dry_run:
+                        logging.info(f"[DRY RUN] Would disable rule '{rule_name}' - {reason}")
+                        stats["rules_disabled"] += 1
+                        stats["disabled_rules_details"].append(rule_details)
+                    else:
+                        # Disable the rule and add comment with retry logic
+                        access_rule.enabled = False
+                        comment = f"DisabledByHitCountScript {current_time} - {reason}"
+                        access_rule.new_comments(action="add", value=comment)
+                        
+                        # Retry the post operation if it times out
+                        post_retry_delays = [10, 20, 30]
+                        post_max_retries = len(post_retry_delays)
+                        post_success = False
+                        
+                        for post_attempt in range(post_max_retries):
+                            try:
+                                access_rule.post()
+                                post_success = True
+                                break  # Success
+                            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout) as e:
+                                if post_attempt < post_max_retries - 1:
+                                    delay = post_retry_delays[post_attempt]
+                                    logging.warning(f"Timeout disabling rule '{rule_name}'. Retrying in {delay}s (attempt {post_attempt+1}/{post_max_retries})...")
+                                    print(f"\nTimeout disabling rule. Retrying in {delay}s...")
+                                    time.sleep(delay)
+                                else:
+                                    logging.error(f"Failed to disable rule '{rule_name}' after {post_max_retries} attempts: {str(e)}")
+                                    print(f"\nFailed to disable rule '{rule_name}' after {post_max_retries} attempts")
+                                    stats["skipped_rules"] += 1
+                        
+                        if post_success:
                             # Full details in log file, minimal console output
                             logging.info(f"Disabled rule '{rule_name}' - {reason}")
                             stats["rules_disabled"] += 1
                             stats["disabled_rules_details"].append(rule_details)
-                            
+                            disabled_count += 1
+                        else:
+                            # Failed to disable after retries - don't count as disabled
+                            logging.warning(f"Skipping rule '{rule_name}' due to persistent timeout errors")
+                    
+                    if self.dry_run:
                         disabled_count += 1
-                    else:
-                        # Log skip reason but don't clutter console
-                        logging.debug(f"Skipped rule '{rule_name}' - {reason}")
-                        stats["rules_skipped"] += 1
-                        
-                        # Store details of ignored rules (zero hits but not disabled)
-                        ignored_rule_details = {
-                            "name": rule_name,
-                            "id": rule_id,
-                            "first_comment": first_comment or "No comment history",
-                            "ignore_reason": reason,
-                            "ignore_detail": self._get_ignore_detail(rule_data, reason)
-                        }
-                        stats["ignored_rules_details"].append(ignored_rule_details)
-                        
+                else:
+                    # Log skip reason but don't clutter console
+                    logging.debug(f"Skipped rule '{rule_name}' - {reason}")
+                    stats["rules_skipped"] += 1
+                    
+                    # Store details of ignored rules (zero hits but not disabled)
+                    ignored_rule_details = {
+                        "name": rule_name,
+                        "id": rule_id,
+                        "first_comment": first_comment or "No comment history",
+                        "ignore_reason": reason,
+                        "ignore_detail": self._get_ignore_detail(rule_data, reason)
+                    }
+                    stats["ignored_rules_details"].append(ignored_rule_details)
+            
             logging.info("Hit count analysis completed")
             
             # Print final summary to console

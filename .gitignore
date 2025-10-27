@@ -4,3 +4,4 @@ old/
 *.log
 run_fmc_test.sh
 FW*
+SDC*
