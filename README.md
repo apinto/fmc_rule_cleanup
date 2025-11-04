@@ -189,6 +189,11 @@ python3 fmc_rule_cleanup.py \
 
 ## Usage
 
+> **IMPORTANT NOTE:**
+> Hit count information in Cisco FMC is not synchronized in real time. To avoid the risk of disabling rules that have recent hits, it is strongly recommended to manually synchronize the hit counts in FMC before running this script.
+> 
+> In FMC, go to your Access Control Policy (ACP), select **Analyse → Hit Counts → See Last Fetched**, and click **Refresh** to update the hit count data.
+
 ### Basic Usage
 
 ```bash
