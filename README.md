@@ -1,3 +1,5 @@
+[![published](https://static.production.devnetcloud.com/codeexchange/assets/images/devnet-published.svg)](https://developer.cisco.com/codeexchange/github/repo/apinto/fmc_rule_cleanup)
+[![Run in Cisco Cloud IDE](https://static.production.devnetcloud.com/codeexchange/assets/images/devnet-runable-icon.svg)](https://developer.cisco.com/codeexchange/devenv/apinto/fmc_rule_cleanup/)
 # FMC Access Rule Hit Count Analysis and Auto-Disable Script
 
 A Python script that analyzes Cisco Firewall Management Center (FMC) access control rules based on hit counts and automatically disables unused rules that meet specific criteria.
